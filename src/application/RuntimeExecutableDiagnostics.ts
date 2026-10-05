@@ -106,7 +106,13 @@ export const inspectRuntimeExecutables = async (
   const diagnostics = await mapConcurrentBounded(
     uniqueCandidates,
     PROBE_CONCURRENCY,
-    (candidate) => probeCandidate(candidate, options.timeoutMs, options.path),
+    (candidate) =>
+      probeCandidate(
+        candidate,
+        options.timeoutMs,
+        options.path,
+        options.platform,
+      ),
   );
   return {
     launcher_node: await canonicalPath(options.launcherNode),
@@ -151,9 +157,15 @@ const probeCandidate = async (
   },
   timeoutMs: number | undefined,
   effectivePath: string,
+  platform: NodeJS.Platform,
 ): Promise<RuntimeExecutableDiagnostic> => {
   const canonical = await canonicalPath(candidate.path);
-  const result = await executeVersion(candidate.path, timeoutMs, effectivePath);
+  const result = await executeVersion(
+    candidate.path,
+    timeoutMs,
+    effectivePath,
+    platform,
+  );
   const identity = {
     tool: candidate.tool,
     lexical_path: candidate.path,
@@ -179,13 +191,14 @@ const executeVersion = (
   path: string,
   timeoutMs: number | undefined,
   effectivePath: string,
+  platform: NodeJS.Platform = process.platform,
 ): Promise<VersionResult> =>
   new Promise((resolve) => {
     // Node >= 18.20 refuses to spawn .cmd/.bat files without a shell
     // (CVE-2024-27980 mitigation) and throws spawn EINVAL. On Windows, npm and
     // npx PATH shims are .CMD files, so every probe of them failed. Route
     // batch-file candidates through cmd.exe instead.
-    const command = windowsBatchCommand(path);
+    const command = windowsBatchCommand(path, platform);
     const child = command
       ? spawn(command.executable, command.arguments, {
           windowsHide: true,
@@ -252,18 +265,28 @@ const executeVersion = (
  * (.cmd/.bat/.CMD/.BAT). Returns null for anything else, including on
  * non-Windows platforms. The whole command line is passed as one
  * /c argument so paths with spaces survive; `windowsVerbatimArguments`
- * keeps Node from re-quoting it.
+ * keeps Node from re-quoting it. Embedded double quotes are doubled,
+ * since a bare quote would terminate the /c string and allow argument
+ * injection via a crafted PATH entry.
  */
 const windowsBatchCommand = (
   path: string,
+  platform: NodeJS.Platform = process.platform,
+  systemRoot: string = process.env.SystemRoot ?? "C:\\Windows",
 ): { executable: string; arguments: string[] } | null => {
-  if (process.platform !== "win32") return null;
+  if (platform !== "win32") return null;
   if (!/\.(cmd|bat)$/iu.test(path)) return null;
   return {
-    executable: `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\cmd.exe`,
-    arguments: ["/d", "/s", "/c", `"${path}" --version`],
+    executable: `${systemRoot}\\System32\\cmd.exe`,
+    arguments: ["/d", "/s", "/c", `"${path.replaceAll('"', '""')}" --version`],
   };
 };
+
+/**
+ * Testing-only re-export of the batch-command builder. Pure and
+ * platform-injected, so it is fully exercisable on non-Windows hosts.
+ */
+export const windowsBatchCommandForTesting = windowsBatchCommand;
 
 /** Testing-only re-export of the version probe. */
 export const executeVersionForTesting = executeVersion;
