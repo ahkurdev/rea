@@ -181,11 +181,23 @@ const executeVersion = (
   effectivePath: string,
 ): Promise<VersionResult> =>
   new Promise((resolve) => {
-    const child = spawn(path, ["--version"], {
-      windowsHide: true,
-      env: environmentWithPath(effectivePath),
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    // Node >= 18.20 refuses to spawn .cmd/.bat files without a shell
+    // (CVE-2024-27980 mitigation) and throws spawn EINVAL. On Windows, npm and
+    // npx PATH shims are .CMD files, so every probe of them failed. Route
+    // batch-file candidates through cmd.exe instead.
+    const command = windowsBatchCommand(path);
+    const child = command
+      ? spawn(command.executable, command.arguments, {
+          windowsHide: true,
+          windowsVerbatimArguments: true,
+          env: environmentWithPath(effectivePath),
+          stdio: ["ignore", "pipe", "pipe"],
+        })
+      : spawn(path, ["--version"], {
+          windowsHide: true,
+          env: environmentWithPath(effectivePath),
+          stdio: ["ignore", "pipe", "pipe"],
+        });
     let stdout = "";
     let stderr = "";
     let spawnError: Error | undefined;
@@ -234,6 +246,27 @@ const executeVersion = (
       });
     });
   });
+
+/**
+ * Build the cmd.exe invocation for a Windows batch-file candidate
+ * (.cmd/.bat/.CMD/.BAT). Returns null for anything else, including on
+ * non-Windows platforms. The whole command line is passed as one
+ * /c argument so paths with spaces survive; `windowsVerbatimArguments`
+ * keeps Node from re-quoting it.
+ */
+const windowsBatchCommand = (
+  path: string,
+): { executable: string; arguments: string[] } | null => {
+  if (process.platform !== "win32") return null;
+  if (!/\.(cmd|bat)$/iu.test(path)) return null;
+  return {
+    executable: `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\cmd.exe`,
+    arguments: ["/d", "/s", "/c", `"${path}" --version`],
+  };
+};
+
+/** Testing-only re-export of the version probe. */
+export const executeVersionForTesting = executeVersion;
 
 const classifyProbeFailure = (
   cause: Error,
